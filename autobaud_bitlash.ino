@@ -3,7 +3,7 @@
 // target : Arduino Mega (ATMega2560)
 // note   : - use timer1 for 0.5 uS accuracy time measure 
 //            (arduino core micros() is just 4us accuracy).
-//          - signal to detect must be wire on pin 2.
+//          - signal to detect must be wire on pin 19 (Rx of Serial1).
 //          - use bitlash for console manager (see https://github.com/billroy/bitlash)
 //          - use Timer for schedule tasks (see  https://github.com/JChristensen/Timer)
 
@@ -11,20 +11,30 @@
 #include "bitlash.h"
 #include "Timer.h"
 
+// macro
+#define ROW_COUNT(array)  (sizeof(array) / sizeof(*array))
+
 // const
 // pin 2 = interrupt 1 on UNO board
-const byte SERIAL_IN_PIN = 2;
-const byte SERIAL_IN_INT = 0;
+const byte SERIAL_IN_PIN = 19;
+const byte SERIAL_IN_INT = 4;
+
+// struct
+struct in_bytes {
+  byte value;
+  unsigned long time;
+};
 
 // vars
+in_bytes rx_bytes[30];
+byte rx_byte_index;
 word times_buffer[60];
-byte level;
 volatile word isr_times_buffer[60];
 byte isr_index_buffer;
-word start_bit;
 word max_step, min_step;
 byte max_index, min_index;
-unsigned long baud;
+unsigned long auto_baud;
+unsigned long uart_baud;
 Timer t;
 
 // ISR call when edges rising/falling occurs on SERIAL_IN_PIN
@@ -60,8 +70,6 @@ void update_time_buffer(void) {
   // search minimal/maximal time step
   max_step = 0;
   min_step = 0xFFFF;
-  start_bit = 0;
-  level = 0;
 
   for (byte i = 0; i < 60; i++) {
     // skip special values
@@ -77,49 +85,45 @@ void update_time_buffer(void) {
         min_index = i;
       }
     }
-    if (times_buffer[i] != 0)
-      level++;
   }
   
-  // compute baudrate
-  baud = 2 * (1e6 / min_step);
-   
-  // count start bit
-  for (byte i = 0; i < 60; i++) {
-    // count start bit
-    if (times_buffer[i] > (min_step * 15)) {
-      start_bit++;
-    }
-  }
+  // compute auto baudrate
+  auto_baud = 2 * (1e6 / min_step);
 }
 
-numvar printRAW(void) {  
+numvar printRaw(void) {  
   // display array
-  /*
-  for (byte i = 0; i < 60; i++) {
-    Serial.print(times_buffer[i]);
-    Serial.print(" ");
+  // banner
+  printf_P(PSTR("Index | Time (ms) | Hex  | Dec | ASCII\r\n"));    
+  // datas
+  for (byte i = 0; i < ROW_COUNT(rx_bytes); i++) {
+    printf_P(PSTR("%03d   | %6lu    | 0x%02x | %03d | %c  \r\n"), i, rx_bytes[i].time, rx_bytes[i].value, rx_bytes[i].value, rx_bytes[i].value);    
   }
-  Serial.println();*/
-      
-  // display min_step time and compute baudrate
-  printf_P(PSTR("start bit : %5d\r\n"), start_bit);
-  printf_P(PSTR("min step  : %5d us\r\n"), min_step/2);
-  printf_P(PSTR("max step  : %5d us\r\n"), max_step/2);
-  printf_P(PSTR("level     : %5d\r\n"), level);
-
+  printf_P(PSTR("\r\n"));
   return 0;
 }
 
+numvar printStat(void) {       
+  // display min_step time and compute baudrate
+  printf_P(PSTR("min step  : %5d us\r\n"), min_step/2);
+  printf_P(PSTR("max step  : %5d us\r\n"), max_step/2);
+  return 0;
+}
+
+numvar setBaud(void) {
+  uart_baud = getarg(1);
+  Serial1.begin(uart_baud);
+  return 0;
+}
+
+// return true if theoric baudrate and measure baudrate are 10% accuracy
 bool is_baud(long theoric, long measure) {
   return (measure > (theoric - theoric * 0.1)) and (measure < (theoric + theoric *0.1));
 }
 
-numvar printBaud(void) {
-  printf_P(PSTR("baud measured  : %6lu bps\r\n"), baud);
-  // convert measured baud to estimated baud
+// convert "baud" (like 305) to normalized baud (like 300 or 9600)
+unsigned long norm_baud(unsigned long baud) {
   long estim_baud = 0;
-  
   if (is_baud(300, baud))
     estim_baud = 300;
   else if (is_baud(600, baud))
@@ -144,8 +148,13 @@ numvar printBaud(void) {
     estim_baud = 57600;  
   else if (is_baud(115200, baud))
     estim_baud = 115200;  
-  
-  printf_P(PSTR("baud estimated : %6lu bps\r\n"), estim_baud);
+  return estim_baud;  
+}
+
+numvar printBaud(void) {
+  printf_P(PSTR("baud measured  : %6lu bps\r\n"), auto_baud);
+  printf_P(PSTR("baud estimated : %6lu bps\r\n"), norm_baud(auto_baud));
+  printf_P(PSTR("UART set baud  : %6lu bps\r\n"), uart_baud);
   return 0;  
 }
 
@@ -164,6 +173,7 @@ static int uart_putchar (char c, FILE *stream)
 
 void setup(void) {
   // vars init
+  rx_byte_index = 0;
   isr_index_buffer = 0;
   // timer1 init
   // disable global interrupts
@@ -175,18 +185,36 @@ void setup(void) {
   sei();
   // init bitlash
   initBitlash(57600);
-  // add bitlash function
-  addBitlashFunction("raw", (bitlash_function) printRAW);
-  addBitlashFunction("bd", (bitlash_function) printBaud);
+  // add spy functions to bitlash function
+  addBitlashFunction("spy_dump", (bitlash_function) printRaw);
+  addBitlashFunction("spy_stat", (bitlash_function) printStat);
+  addBitlashFunction("spy_baud", (bitlash_function) printBaud);
+  addBitlashFunction("spy_setbaud", (bitlash_function) setBaud);
   // fill in the UART file descriptor with pointer to writer
   fdev_setup_stream (&uartout, uart_putchar, NULL, _FDEV_SETUP_WRITE);
   // standard output device STDOUT is uart
   stdout = &uartout ;
+  // init serial 1 (pin18/19)
+  Serial1.begin(9600);
+  uart_baud = 9600;
   // launch timer task
   int updateJob = t.every(500, update_time_buffer);
   // IO init
   pinMode(SERIAL_IN_PIN, INPUT);
   attachInterrupt(SERIAL_IN_INT, isr_serial_change, CHANGE);
+}
+
+// call if data available on Serial1
+void serialEvent1() {
+  while (Serial1.available()) {
+    // read rx byte
+    char inChar = (char)Serial1.read();
+    // add rx byte to array
+    rx_bytes[rx_byte_index].value = inChar;
+    rx_bytes[rx_byte_index].time  = millis();
+    if (++rx_byte_index >= ROW_COUNT(rx_bytes))
+      rx_byte_index = 0;
+  }
 }
 
 void loop(void) {
