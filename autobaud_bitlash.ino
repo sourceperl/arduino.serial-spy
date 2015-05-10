@@ -23,12 +23,12 @@ const byte SERIAL_IN_INT = 4;
 struct in_bytes {
   byte value;
   unsigned long time;
+  bool set;
 };
 
 // vars
-in_bytes rx_bytes[30];
-byte rx_byte_index;
-word times_buffer[60];
+in_bytes rx_bytes[512];
+word rx_byte_index;
 volatile word isr_times_buffer[60];
 byte isr_index_buffer;
 word max_step, min_step;
@@ -60,44 +60,71 @@ void isr_serial_change() {
 }
 
 void update_time_buffer(void) {
-  // copy ISR buffer to times array (avoid long ISRs stop)
-  cli();
-  for (byte i = 0; i < 60; i++) {
-    times_buffer[i] = isr_times_buffer[i];
-  }
-  sei();
-
   // search minimal/maximal time step
   max_step = 0;
   min_step = 0xFFFF;
-
+  cli();
   for (byte i = 0; i < 60; i++) {
     // skip special values
-    if ((times_buffer[i] != 0) and (times_buffer[i] != 0xFFFF))  {
+    if ((isr_times_buffer[i] != 0) and (isr_times_buffer[i] != 0xFFFF))  {
       // search max step
-      if (times_buffer[i] > max_step) {
-        max_step = times_buffer[i];
+      if (isr_times_buffer[i] > max_step) {
+        max_step = isr_times_buffer[i];
         max_index = i;
       }    
       // search min step
-      if (times_buffer[i] < min_step) {
-        min_step = times_buffer[i];
+      if (isr_times_buffer[i] < min_step) {
+        min_step = isr_times_buffer[i];
         min_index = i;
       }
     }
   }
-  
+  sei();
   // compute auto baudrate
   auto_baud = 2 * (1e6 / min_step);
 }
 
-numvar printRaw(void) {  
-  // display array
+// display RAW data receive on UART Serial1
+// arg1 is max number of line to print
+// arg2 is lifo_mode (new value first)
+numvar printRaw(void) {
+  word disp_row = ROW_COUNT(rx_bytes);
+  bool lifo_mode = false;
+  // can force max row with arg
+  if (getarg(0) > 0)
+    disp_row = (getarg(1) < ROW_COUNT(rx_bytes)) ? getarg(1) : ROW_COUNT(rx_bytes);
+  if (getarg(0) > 1)
+    lifo_mode = (getarg(2) != 0);
   // banner
   printf_P(PSTR("Index | Time (ms) | Hex  | Dec | ASCII\r\n"));    
   // datas
-  for (byte i = 0; i < ROW_COUNT(rx_bytes); i++) {
-    printf_P(PSTR("%03d   | %6lu    | 0x%02x | %03d | %c  \r\n"), i, rx_bytes[i].time, rx_bytes[i].value, rx_bytes[i].value, rx_bytes[i].value);    
+  word i = (lifo_mode) ? rx_byte_index - 1: rx_byte_index;
+  word index = 0;
+  word line = 0;
+  unsigned long t_origin = 0;
+  /* loop: 
+  fifo : [rx_byte_index] (++) -> end array -> 0 (++) -> [rx_byte_index-1]
+  lifo : [rx_byte_index-1] (--) -> 0 -> end array (--) -> [rx_byte_index] */
+  while((index < ROW_COUNT(rx_bytes)) and (line < disp_row)) {
+    if (rx_bytes[i].set) {
+      // search first timestamp for time origin
+      if (t_origin == 0)
+        t_origin = rx_bytes[i].time;
+      // no printable ascii -> set to 0x00
+      char ascii = ((rx_bytes[i].value >= 0x20) and (rx_bytes[i].value <= 0x7e)) ? rx_bytes[i].value : 0x00;
+      printf_P(PSTR("  %3d | %9ld | 0x%02x | %3d | %c\r\n"), line++, rx_bytes[i].time - t_origin, rx_bytes[i].value, rx_bytes[i].value, ascii);
+    }
+    index++;
+    // next byte
+    if (! lifo_mode) {
+      // old data first 
+      if (++i >= ROW_COUNT(rx_bytes))
+        i = 0;
+    } else {
+      // new data first
+      if (i-- == 0)
+        i = ROW_COUNT(rx_bytes) - 1;
+    }
   }
   printf_P(PSTR("\r\n"));
   return 0;
@@ -123,38 +150,38 @@ bool is_baud(long theoric, long measure) {
 
 // convert "baud" (like 305) to normalized baud (like 300 or 9600)
 unsigned long norm_baud(unsigned long baud) {
-  long estim_baud = 0;
   if (is_baud(300, baud))
-    estim_baud = 300;
+    return 300;
   else if (is_baud(600, baud))
-    estim_baud = 600;  
+    return 600;  
   else if (is_baud(1200, baud))
-    estim_baud = 1200;  
+    return 1200;  
   else if (is_baud(2400, baud))
-    estim_baud = 2400;  
+    return 2400;  
   else if (is_baud(4800, baud))
-    estim_baud = 4800;  
+    return 4800;  
   else if (is_baud(9600, baud))
-    estim_baud = 9600;  
+    return 9600;  
   else if (is_baud(14400, baud))
-    estim_baud = 14400;  
+    return 14400;  
   else if (is_baud(19200, baud))
-    estim_baud = 19200;  
+    return 19200;  
   else if (is_baud(28800, baud))
-    estim_baud = 28800;  
+    return 28800;  
   else if (is_baud(38400, baud))
-    estim_baud = 38400;  
+    return 38400;  
   else if (is_baud(57600, baud))
-    estim_baud = 57600;  
+    return 57600;  
   else if (is_baud(115200, baud))
-    estim_baud = 115200;  
-  return estim_baud;  
+    return 115200;
+  else 
+    return 0;
 }
 
 numvar printBaud(void) {
   printf_P(PSTR("baud measured  : %6lu bps\r\n"), auto_baud);
   printf_P(PSTR("baud estimated : %6lu bps\r\n"), norm_baud(auto_baud));
-  printf_P(PSTR("UART set baud  : %6lu bps\r\n"), uart_baud);
+  printf_P(PSTR("baud UART      : %6lu bps\r\n"), uart_baud);
   return 0;  
 }
 
@@ -165,8 +192,7 @@ static FILE uartout = {0};
 // create a output function
 // This works because Serial.write, although of
 // type virtual, already exists.
-static int uart_putchar (char c, FILE *stream)
-{
+static int uart_putchar (char c, FILE *stream) {
   Serial.write(c);
   return 0;
 }
@@ -211,7 +237,8 @@ void serialEvent1() {
     char inChar = (char)Serial1.read();
     // add rx byte to array
     rx_bytes[rx_byte_index].value = inChar;
-    rx_bytes[rx_byte_index].time  = millis();
+    rx_bytes[rx_byte_index].time = millis();
+    rx_bytes[rx_byte_index].set = true;    
     if (++rx_byte_index >= ROW_COUNT(rx_bytes))
       rx_byte_index = 0;
   }
