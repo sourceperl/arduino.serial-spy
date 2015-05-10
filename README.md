@@ -1,6 +1,10 @@
 # arduino.serial-spy
 A tool for spy serial line (RS232/485) from an Arduino Mega 2560 (in development)
 
+Wiring :
+
+![](img/serial-spy_bb.jpg)
+
 Bitlash shell, spy function :
 
 - **spy_dump(MaxLine2Display, lifo mode [default off])**:
