@@ -5,6 +5,10 @@ Wiring :
 
 ![](img/serial-spy_bb.jpg)
 
+Example :
+
+![](img/serial-spy-screen.png)
+
 Bitlash shell, spy function :
 
 - **spy_dump(MaxLine2Display, lifo mode [default off])**:
