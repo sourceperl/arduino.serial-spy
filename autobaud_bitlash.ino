@@ -96,9 +96,9 @@ numvar printRaw(void) {
   if (getarg(0) > 1)
     lifo_mode = (getarg(2) != 0);
   // banner
-  printf_P(PSTR("Index | Time (ms) | Hex  | Dec | ASCII\r\n"));    
+  printf_P(PSTR("Index |  Time (ms)  | Hex  | Dec | ASCII\r\n"));
   // datas
-  word i = (lifo_mode) ? rx_byte_index - 1: rx_byte_index;
+  word i = (lifo_mode and rx_byte_index) ? rx_byte_index - 1: rx_byte_index;
   word index = 0;
   word line = 0;
   unsigned long t_origin = 0;
@@ -112,7 +112,7 @@ numvar printRaw(void) {
         t_origin = rx_bytes[i].time;
       // no printable ascii -> set to 0x00
       char ascii = ((rx_bytes[i].value >= 0x20) and (rx_bytes[i].value <= 0x7e)) ? rx_bytes[i].value : 0x00;
-      printf_P(PSTR("  %3d | %9ld | 0x%02x | %3d | %c\r\n"), line++, rx_bytes[i].time - t_origin, rx_bytes[i].value, rx_bytes[i].value, ascii);
+      printf_P(PSTR("  %3d | %11ld | 0x%02x | %3d | %c\r\n"), line++, rx_bytes[i].time - t_origin, rx_bytes[i].value, rx_bytes[i].value, ascii);
     }
     index++;
     // next byte
