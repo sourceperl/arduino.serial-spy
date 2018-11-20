@@ -5,8 +5,8 @@
 
   Hardware:
   - Arduino MKR Zero
-  - Arduino MKR 485 shield (with 3 dip switch to off) 
-      -> RS signal to spy connect to Y and Z
+  - Arduino MKR 485 shield (dip switch set as : A/B resisotor to off, half/full to on and Y/Z resistor off)
+     -> RS signal to spy connect to A(+) and B(-)
 */
 
 #include <stdarg.h>
@@ -18,11 +18,13 @@
 // serial commands
 #define CMD_TIMEOUT   10E3
 #define MAX_CMD_SIZE  64
+#define SERIAL_RX_PIN 13
 
 // some global vars
 // mode
 bool dump_mode = false;
 // rs rate info
+char rs_parity = 'N';
 uint32_t rs_baudrate = 9600;
 uint16_t rs_eof_us = 3500;
 // stats
@@ -61,6 +63,16 @@ void task_serial_command() {
       // no more data
       if (inByte == -1)
         break;
+      // manage backspace
+      if ((inByte == 0x08) or (inByte == 0x7f)) {
+        // remove last char in buffer
+        cmd_rx_buf.remove(cmd_rx_buf.length() - 1);
+        // send backspace + ' ' + backspace
+        Serial.print((char) 8);
+        Serial.print(' ');
+        Serial.print((char) 8);
+        break;
+      }
       // if echo on
       if (cmd_echo_mode)
         Serial.print((char) inByte);
@@ -77,8 +89,8 @@ void task_serial_command() {
       if (inByte == '\n')
         break;
     }
-    // skip command not ended with "\r\n"
-    if (! cmd_rx_buf.endsWith("\r\n"))
+    // skip command not ended with "\n"
+    if (! cmd_rx_buf.endsWith("\n"))
       break;
     // remove leading and trailing \r\n, force case
     cmd_rx_buf.trim();
@@ -94,26 +106,21 @@ void task_serial_command() {
       s_arg.toLowerCase();
     }
     // check command
-    if (s_cmd.equals("help")) {
-      Serial.println("Control local echo:");
-      Serial.println("echo on          turn on local echo");
-      Serial.println("echo off         turn off local echo");
-      Serial.println("echo             display current status");
-      Serial.println("");
-      Serial.println("Control dump mode (= display modbus frame as hexadecimal values):");
-      Serial.println("dump on          turn on dump mode");
-      Serial.println("dump off         turn off dump mode");
-      Serial.println("dump             display current status");
-      Serial.println("");
-      Serial.println("Set serial baudrate: !!! change baudrate update EOF value with default 3.5 x byte time !!!");
-      Serial.println("baudrate 9600    set RS485 baudrate to 9600");
-      Serial.println("rate 9600        idem as baudrate 9600");
-      Serial.println("baudrate         display current baudrate and EOF (= end of frame) value in us");
-      Serial.println("");
-      Serial.println("Set modbus EOF (end of frame time) value:");
-      Serial.println("eof 3500         set EOF to 3500 us (= 3.5 ms)");
-      Serial.println("eof              display current EOF (= end of frame) value in us");
-      Serial.println("");
+    if (s_cmd.equals("?") or s_cmd.equals("help")) {
+      Serial.println("-------------------------------------------------------------------------------");
+      Serial.println("dump           turn on dump mode (= display modbus frame as hexadecimal values)");
+      Serial.println("end            turn off dump mode");
+      Serial.println("stat           view current RS485 modbus stat (nb of frames, CRC errors....)");
+      Serial.println("clear          clear current RS485 modbus stat");
+      Serial.println("echo on        turn on command echo");
+      Serial.println("echo off       turn off command echo");
+      Serial.println("echo           display current status");
+      Serial.println("auto           view autodetected serial baudrate");
+      Serial.println("serial         view current RS485 params");
+      Serial.println("rate 9600      set RS485 baudrate to 9600 bauds (auto update EOF)");
+      Serial.println("parity even    set RS485 parity to even (other choice are none or odd)");
+      Serial.println("eof 3500       set modbus EOF (end of frame) to 3500 us (= 3.5 ms)");
+      Serial.println("-------------------------------------------------------------------------------");
     }
     else if (s_cmd.equals("echo")) {
       if (s_arg.equals("on")) {
@@ -130,18 +137,12 @@ void task_serial_command() {
       }
     }
     else if (s_cmd.equals("dump")) {
-      if (s_arg.equals("on")) {
-        Serial.println("dump mode is on");
-        dump_mode = true;
-      }
-      else if (s_arg.equals("off")) {
-        Serial.println("dump mode is off");
-        dump_mode = false;
-      }
-      else {
-        Serial.print("dump mode is ");
-        Serial.println(dump_mode ? String("on") : String("off"));
-      }
+      Serial.println("dump mode is on");
+      dump_mode = true;
+    }
+    else if (s_cmd.equals("end")) {
+      Serial.println("dump mode is off");
+      dump_mode = false;
     }
     else if (s_cmd.equals("clear")) {
       // clear counters
@@ -156,22 +157,48 @@ void task_serial_command() {
       // console stats
       serial_printf("stats: frame count %06d | error CRC %06d | exception %06d | too short %06d\r\n", rs_stat_frame_count, rs_stat_err_crc, rs_stat_err_exp, rs_stat_err_short);
     }
-    else if (s_cmd.equals("baudrate") or s_cmd.equals("rate")) {
+    else if (s_cmd.equals("auto")) {
+      // console stats
+      //serial_printf("RX is %d\r\n", digitalRead(13));
+      serial_printf("start baudrate autodetect: please wait...\r\n");
+      for (uint8_t t = 1; t <= 5; t++) {
+        uint32_t baudrate = find_baudrate();
+        if (baudrate == 0)
+          serial_printf("try %d: baudrate not found\r\n", t);
+        else
+          serial_printf("try %d: find baudrate at %d bauds\r\n", t, baudrate);
+        delay(75);
+      }
+    }
+    else if (s_cmd.equals("serial")) {
+      rs485_show();
+    }
+    else if (s_cmd.equals("rate")) {
       uint32_t set_baudrate = s_arg.toInt();
       if (set_baudrate > 0) {
         rs_baudrate = set_baudrate;
         rs_eof_us = max(round((10.0 / rs_baudrate) * 3.5 * 1e6), 1);
-        rs485_setup();
       }
-      Serial.println("RS485: baudrate set to " + String(rs_baudrate) + " bauds, end of frame set to " + String(rs_eof_us) + " us");
+      rs485_setup();
+    }
+    else if (s_cmd.equals("parity")) {
+      if (s_arg.equals("none") or s_arg.equals("n"))
+        rs_parity = 'N';
+      else if (s_arg.equals("even") or s_arg.equals("e"))
+        rs_parity = 'E';
+      else if (s_arg.equals("odd") or s_arg.equals("o"))
+        rs_parity = 'O';
+      rs485_setup();
     }
     else if (s_cmd.equals("eof")) {
       uint32_t set_eof = s_arg.toInt();
       if (set_eof > 0) {
         rs_eof_us = max(set_eof, 1);
-        rs485_setup();
       }
-      Serial.println("RS485: end of frame set to " + String(rs_eof_us) + " us");
+      rs485_setup();
+    }
+    else {
+      Serial.println("unknown command send \"?\" to view online help");
     }
     // reset for next one
     cmd_rx_buf = "";
@@ -184,54 +211,51 @@ void task_spy_rs() {
   static uint16_t frame_pos = 0;
   static uint8_t frame_buff[256];
   // detect EOF (end of frame => silent of 3.5 x byte transmit time)
-  if (micros() - t_last_byte > rs_eof_us) {
-    // parse frame buffer
-    if (frame_pos > 0) {
-      // frame counter
-      rs_stat_frame_count++;
-      // check errors
-      bool err_short = false;
-      bool err_crc = false;
-      bool err_except = false;
-      // check frame size
-      if (frame_pos >= 5) {
-        // check crc
-        uint16_t c_crc16 = crc16(frame_buff, frame_pos - 2);
-        if (!((frame_buff[frame_pos - 2] ==  (c_crc16 & 0xff)) and (frame_buff[frame_pos - 1] == (c_crc16 >> 8))))
-          err_crc = true;
-        // modbus except
-        else if (frame_buff[1] > 0x80)
-          err_except = true;
-      } else {
-        err_short = true;
-      }
-      // update stats
-      if (err_crc)
-        rs_stat_err_crc++;
-      if (err_except)
-        rs_stat_err_exp++;
+  if ((micros() - t_last_byte > rs_eof_us) and (frame_pos > 0)) {
+    // frame counter
+    rs_stat_frame_count++;
+    // check errors
+    bool err_short = false;
+    bool err_crc = false;
+    bool err_except = false;
+    // check frame size
+    if (frame_pos >= 5) {
+      // check crc
+      uint16_t c_crc16 = crc16(frame_buff, frame_pos - 2);
+      if (!((frame_buff[frame_pos - 2] ==  (c_crc16 & 0xff)) and (frame_buff[frame_pos - 1] == (c_crc16 >> 8))))
+        err_crc = true;
+      // modbus except
+      else if (frame_buff[1] > 0x80)
+        err_except = true;
+    } else {
+      err_short = true;
+    }
+    // update stats
+    if (err_crc)
+      rs_stat_err_crc++;
+    if (err_except)
+      rs_stat_err_exp++;
+    if (err_short)
+      rs_stat_err_short++;
+    if (dump_mode) {
+      // update frame_status msg
+      String frame_status = "";
       if (err_short)
-        rs_stat_err_short++;
-      if (dump_mode) {
-        // update frame_status msg
-        String frame_status = "";
-        if (err_short)
-          frame_status = "too short";
-        else if (err_crc)
-          frame_status = "bad CRC";
-        else if (err_except)
-          frame_status = "exception";
-        // print header with frame size and CRC status
-        serial_printf("MSG #%06d S%03d:", rs_stat_frame_count, frame_pos);
-        // dump frame as hex value
-        for (uint16_t i = 0; i < frame_pos; i++) {
-          serial_printf(" %02x", frame_buff[i]);
-        }
-        // error message
-        if (frame_status.length() > 0)
-          serial_printf(" [%s]", frame_status.c_str());
-        Serial.println();
+        frame_status = "too short";
+      else if (err_crc)
+        frame_status = "bad CRC";
+      else if (err_except)
+        frame_status = "exception";
+      // print header with frame size and CRC status
+      serial_printf("MSG #%06d S%03d:", rs_stat_frame_count, frame_pos);
+      // dump frame as hex value
+      for (uint16_t i = 0; i < frame_pos; i++) {
+        serial_printf(" %02x", frame_buff[i]);
       }
+      // error message
+      if (frame_status.length() > 0)
+        serial_printf(" [%s]", frame_status.c_str());
+      Serial.println();
     }
     frame_pos = 0;
   }
@@ -267,9 +291,53 @@ uint16_t crc16(uint8_t *buf, uint8_t len)
   return crc;
 }
 
+uint32_t find_baudrate() {
+  // detect symbol size: minimun pulse width
+  uint32_t symbol_w_us = pulseIn(SERIAL_RX_PIN, LOW, 1E6);
+  // normalize symbol width (in us) to baudrate
+  if (symbol_w_us < 4)
+    return 0;
+  else if (symbol_w_us < 12)
+    return 115200;
+  else if (symbol_w_us < 20)
+    return 57600;
+  else if (symbol_w_us < 29)
+    return 38400;
+  else if (symbol_w_us < 40)
+    return 28800;
+  else if (symbol_w_us < 60)
+    return 19200;
+  else if (symbol_w_us < 80)
+    return 14400;
+  else if (symbol_w_us < 150)
+    return 9600;
+  else if (symbol_w_us < 300)
+    return 4800;
+  else if (symbol_w_us < 600)
+    return 2400;
+  else if (symbol_w_us < 1200)
+    return 1200;
+  else
+    return 0;
+}
+
 void rs485_setup() {
-  RS485.begin(rs_baudrate);
+  // begin with parity params
+  if (rs_parity == 'E')
+    RS485.begin(rs_baudrate, SERIAL_8E1);
+  else if (rs_parity == 'O')
+    RS485.begin(rs_baudrate, SERIAL_8O1);
+  else
+    RS485.begin(rs_baudrate, SERIAL_8N1);
+  // turn receive on
   RS485.receive();
+  // echo serial setup
+  rs485_show();
+}
+
+void rs485_show() {
+  // echo current setup on console
+  Serial.println("RS serial set to " + String(rs_baudrate) + "," + rs_parity + ",8,1 | modbus EOF set to " + String(rs_eof_us) + " us");
 }
 
 void serial_printf(char *fmt, ... ) {
@@ -296,3 +364,4 @@ void loop() {
   // scheduler handler
   runner.execute();
 }
+
